@@ -1,14 +1,12 @@
 // ==UserScript==
 // @name         DegenIdle Market Scraper - Telegram
 // @namespace    http://tampermonkey.net/
-// @version      4.3
-// @description  Lê o mercado item por item, envia alertas ao Telegram se encontrar ofertas vantajosas. Agora com botão para iniciar.
+// @version      4.4
+// @description  Lê o mercado item por item (todas as páginas), envia alertas ao Telegram se encontrar ofertas vantajosas. Agora com paginação automática.
 // @author       DarkDragon + Lucashmg
 // @match        https://degenidle.com/market
 // @grant        GM_xmlhttpRequest
 // @run-at       document-idle
-// @downloadURL https://update.greasyfork.org/scripts/550154/DegenIdle%20Market%20Scraper%20-%20Telegram.user.js
-// @updateURL https://update.greasyfork.org/scripts/550154/DegenIdle%20Market%20Scraper%20-%20Telegram.meta.js
 // ==/UserScript==
 
 (function () {
@@ -17,7 +15,6 @@
     const BOT_TOKEN = '8212301892:AAFGNTLNXhzo04DPfpd-VbgUdKUru6KxN44';
     const CHAT_ID = '-1003066433402';
 
-    // Sua lista ITEMS_TO_WATCH (com variantes, XP e valores) deve estar aqui
 const ITEMS_TO_WATCH = [
   {
     "Name": "Copper Bodyarmor",
@@ -615,6 +612,7 @@ const ITEMS_TO_WATCH = [
       { "Rarity": "Common", "Value": 1600, "XP": 800 }
     ]
   },
+  // Itens base
   { "Name": "Leather", "Variants": [{ "Rarity": "Common", "Value": 30, "XP": 15 }] },
   { "Name": "Wool Cloth", "Variants": [{ "Rarity": "Common", "Value": 30, "XP": 15 }] },
   { "Name": "Copper Bar", "Variants": [{ "Rarity": "Common", "Value": 30, "XP": 15 }] },
@@ -651,6 +649,7 @@ const ITEMS_TO_WATCH = [
   { "Name": "Astral Cloth", "Variants": [{ "Rarity": "Common", "Value": 180, "XP": 90 }] },
   { "Name": "Nyxium Bar", "Variants": [{ "Rarity": "Common", "Value": 180, "XP": 90 }] },
 
+  // Itens para armas
   { "Name": "Wool Bowstring", "Variants": [{ "Rarity": "Common", "Value": 240, "XP": 120 }] },
   { "Name": "Copper Gemstone", "Variants": [{ "Rarity": "Common", "Value": 240, "XP": 120 }] },
   { "Name": "Leather Handle", "Variants": [{ "Rarity": "Common", "Value": 240, "XP": 120 }] },
@@ -671,7 +670,9 @@ const ITEMS_TO_WATCH = [
   { "Name": "Platinum Gemstone", "Variants": [{ "Rarity": "Common", "Value": 800, "XP": 400 }] },
   { "Name": "Tough Leather Handle", "Variants": [{ "Rarity": "Common", "Value": 800, "XP": 400 }] }
 
-];    const processedItems = new Set();
+    ];
+
+    const processedItems = new Set();
 
     function sendTelegramMessage(message) {
         const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
@@ -694,7 +695,7 @@ const ITEMS_TO_WATCH = [
     function convertPrice(text) {
         if (!text) return 0;
         const cleaned = text.toLowerCase().replace(/[^\d.km]/g, '');
-        const num = parseFloat(cleaned.replace(/[km]/, ''));
+        const num = parseFloat(cleaned.replace(/[km]/, '')) || 0;
         return text.includes('m') ? num * 1_000_000 : text.includes('k') ? num * 1_000 : num;
     }
 
@@ -710,53 +711,64 @@ const ITEMS_TO_WATCH = [
                     clearInterval(timer);
                     reject(new Error(`Elemento "${selector}" não encontrado após ${timeout / 1000}s.`));
                 }
-            }, 300);
+            }, 200);
         });
     }
 
+    async function clickPaginationButton(pageNumber) {
+        // tenta encontrar botão com o número da página (texto exato). adapta se html for diferente.
+        const pagButtons = Array.from(document.querySelectorAll('button, a')).filter(x => x.innerText && x.innerText.trim() === String(pageNumber));
+        if (pagButtons.length) {
+            pagButtons[0].click();
+            // pequena espera para a página carregar
+            await new Promise(r => setTimeout(r, 700));
+            // espera itens aparecerem
+            await waitForElement('.bg-\\[\\#252B3B\\]\\/30', 5000).catch(()=>{});
+            return true;
+        } else {
+            console.warn('[PAG] Botão da página', pageNumber, 'não encontrado.');
+            return false;
+        }
+    }
+
+    function parseTotalPages() {
+        // tenta extrair "Showing 1-25 of 630 items" para calcular total de páginas
+        const el = Array.from(document.querySelectorAll('div, span')).find(x => x.innerText && /Showing\s+\d+\-\d+\s+of\s+\d+\s+items/i.test(x.innerText));
+        if (!el) return 1;
+        const match = el.innerText.match(/Showing\s+\d+\-\d+\s+of\s+(\d+)\s+items/i);
+        if (!match) return 1;
+        const total = parseInt(match[1], 10);
+        const perPage = Array.from(document.querySelectorAll('.bg-\\[\\#252B3B\\]\\/30')).length || 25;
+        return Math.max(1, Math.ceil(total / perPage));
+    }
+
     async function closeItemDetails() {
-        console.log("[DEBUG] Tentando clicar no botão de fechar...");
         try {
-            const closeBtn = await waitForElement("button.mb-4 > span", 5000);
-            closeBtn.parentElement.click();
-            console.log("[DEBUG] Clique no botão de fechar (sem verificação).");
+            const closeBtn = document.querySelector("button.mb-4 > span");
+            if (closeBtn && closeBtn.parentElement) {
+                closeBtn.parentElement.click();
+                await new Promise(r => setTimeout(r, 400));
+            } else {
+                // tenta botão alternativo
+                const alt = document.querySelector('div.bg-\\[\\#1E2330\\]\\/40 button');
+                if (alt) { alt.click(); await new Promise(r => setTimeout(r, 400)); }
+            }
         } catch (err) {
             console.warn("[DEBUG] Falha ao fechar janela:", err.message);
         }
     }
 
-    async function processSingleItem(el) {
-        console.log("[DEBUG] processSingleItem chamado para um elemento", el);
-
-        const name = el.querySelector('h3.font-medium')?.innerText.trim();
-        if (!name) return;
-
-        if (processedItems.has(name)) {
-            console.log(`[DEBUG] Item ${name} já processado`);
-            return;
-        }
-        processedItems.add(name);
-
-        console.log("[DEBUG] Nome do item:", name);
-
-        const item = ITEMS_TO_WATCH.find(i => i.Name === name);
-        if (!item) {
-            console.log("[DEBUG] Item não está na lista ITEMS_TO_WATCH:", name);
-            return;
-        }
-
+    async function processItemElement(el, item) {
+        // el é o botão/card do order LISTING (não o modal). Este trecho abre o item e processa ofertas (mantive sua lógica de agrupamento)
         el.click();
-        console.log("[DEBUG] Clique no item realizado");
-
+        await waitForElement('div.bg-\\[\\#1E2330\\]\\/40', 5000).catch(()=>{});
         try {
-            await waitForElement('div.bg-\\[\\#1E2330\\]\\/40', 5000);
             const container = await waitForElement('div.space-y-3', 5000);
             const orders = container.querySelectorAll('button.grid');
 
             if (!orders.length) {
                 console.log("[DEBUG] Nenhuma ordem de venda");
             } else {
-                // --- INÍCIO DA ALTERAÇÃO: AGRUPA POR PREÇO + RARIDADE ---
                 let grouped = new Map();
 
                 for (const order of orders) {
@@ -793,13 +805,11 @@ const ITEMS_TO_WATCH = [
                     const custo = entry.xp > 0 ? (entry.price / entry.xp).toFixed(2) : 'N/A';
                     foundOffers.push(`💰Valor: ${entry.price} - ${entry.rarity} - ${entry.quantity}\n✨XP: ${entry.xp}\n💰Custo ${custo} G/XP`);
                 }
-                // --- FIM DA ALTERAÇÃO ---
 
                 if (foundOffers.length > 0) {
                     const message = `⚠️ Item encontrado ⚠️\n\n` +
                                     `❗ Item: ${item.Name}\n\n` +
                                     foundOffers.join('\n\n');
-
                     sendTelegramMessage(message);
                 } else {
                     console.log("[DEBUG] Nenhuma oferta vantajosa para o item", item.Name);
@@ -812,30 +822,61 @@ const ITEMS_TO_WATCH = [
         }
     }
 
-    async function processNextItem() {
-        console.log("[DEBUG] processNextItem chamado");
+    async function processPage(pageNumber, totalPages) {
+        // garante que estamos na página correta
+        await clickPaginationButton(pageNumber);
 
-        while (true) {
-            const items = Array.from(document.querySelectorAll('.bg-\\[\\#252B3B\\]\\/30'))
-                .filter(el => {
-                    const name = el.querySelector('h3.font-medium')?.innerText.trim();
-                    return name && !processedItems.has(name);
-                });
+        // pega todos os cards de item visíveis na página e extrai os nomes únicos (copy of names)
+        await new Promise(r => setTimeout(r, 300));
+        const cards = Array.from(document.querySelectorAll('.bg-\\[\\#252B3B\\]\\/30'));
+        const namesOnPage = cards.map(c => c.querySelector('h3.font-medium')?.innerText?.trim()).filter(Boolean);
 
-            if (items.length === 0) {
-                console.log("[DEBUG] Todos os itens foram processados.");
-                break;
+        for (const name of namesOnPage) {
+            if (processedItems.has(name)) continue; // pula já processados
+
+            const item = ITEMS_TO_WATCH.find(i => i.Name === name);
+            if (!item) continue; // não monitorado
+
+            // antes de clicar no elemento, localizar (novamente) o elemento atual na DOM — pode mudar depois de nav
+            const freshCard = Array.from(document.querySelectorAll('.bg-\\[\\#252B3B\\]\\/30')).find(c => {
+                const n = c.querySelector('h3.font-medium')?.innerText?.trim();
+                return n === name;
+            });
+
+            if (!freshCard) {
+                console.warn('[WARN] Elemento não encontrado para', name, 'na página', pageNumber);
+                continue;
             }
 
-            const el = items[0];
-            await processSingleItem(el);
+            // marca como processado para não reprocessar em outras páginas
+            processedItems.add(name);
 
-            // Pausa 1s antes de processar próximo item
-            await new Promise(r => setTimeout(r, 1000));
+            // processa o item (abre modal, checa ordens)
+            await processItemElement(freshCard, item);
+
+            // depois de fechar o modal o jogo pode ter voltado pra página 1. Reposiciona para a página atual antes de continuar.
+            await clickPaginationButton(pageNumber);
+            await new Promise(r => setTimeout(r, 500));
         }
     }
 
-    // Criar botão fixo no canto inferior direito para iniciar o script
+    async function processAllPages() {
+        console.log('[PAG] Iniciando varredura de páginas...');
+        const totalPages = parseTotalPages();
+        console.log('[PAG] Total de páginas estimado:', totalPages);
+
+        for (let p = 1; p <= totalPages; p++) {
+            console.log(`[PAG] Processando página ${p}/${totalPages}...`);
+            await processPage(p, totalPages);
+
+            // pequena pausa entre páginas pra evitar travamento
+            await new Promise(r => setTimeout(r, 600));
+        }
+
+        console.log('[PAG] Varredura completa.');
+    }
+
+    // botão de início
     function createStartButton() {
         const btn = document.createElement('button');
         btn.innerText = 'Iniciar Scraper';
@@ -857,7 +898,7 @@ const ITEMS_TO_WATCH = [
             btn.disabled = true;
             btn.innerText = 'Rodando...';
             console.log("[DEBUG] Script iniciado pelo botão.");
-            processNextItem().then(() => {
+            processAllPages().then(() => {
                 btn.disabled = false;
                 btn.innerText = 'Iniciar Scraper';
                 console.log("[DEBUG] Processamento finalizado.");
@@ -867,9 +908,9 @@ const ITEMS_TO_WATCH = [
         document.body.appendChild(btn);
     }
 
-    // Esperar DOM carregado e criar botão
     window.addEventListener('load', () => {
-        createStartButton();
+        // espera um pouco pro DOM da área de mercado renderizar
+        setTimeout(() => createStartButton(), 800);
     });
 
 })();
